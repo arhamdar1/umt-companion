@@ -1,0 +1,39 @@
+# ===== Virtual environment =====
+# Yeh 100s of MB ka hota hai aur har computer par alag banta hai
+venv/
+.venv/
+
+# ===== Python cache files =====
+# Python khud banata hai, upload karne ki zaroorat nahi
+__pycache__/
+*.pyc
+
+# ===== Personal data (KABHI upload nahi) =====
+# Password/secret wali files
+.env
+*.env
+secrets*
+credentials*
+# Tumhara local database jismein tumhari deadlines/attendance hogi
+*.db
+*.sqlite
+*.sqlite3
+# Saved login cookies
+cookies*.json
+*.cookies
+# Exported calendar files (tumhari personal deadlines)
+*.ics
+# Log files (inmein kabhi kabhi personal info aa jati hai)
+*.log
+logs/
+
+# ===== PyInstaller build output =====
+# .exe GitHub Releases mein upload hogi, code ke saath nahi
+build/
+dist/
+
+# ===== Editor / OS files =====
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
