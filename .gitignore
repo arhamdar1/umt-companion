@@ -9,11 +9,13 @@ __pycache__/
 *.pyc
 
 # ===== Personal data (KABHI upload nahi) =====
-# Password/secret wali files
+# Password/secret wali data files (Python code files nahi)
 .env
 *.env
-secrets*
-credentials*
+secrets.json
+secrets.txt
+credentials.json
+credentials.txt
 # Tumhara local database jismein tumhari deadlines/attendance hogi
 *.db
 *.sqlite
