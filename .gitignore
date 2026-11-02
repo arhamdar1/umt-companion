@@ -39,3 +39,6 @@ dist/
 .idea/
 Thumbs.db
 desktop.ini
+# Debug output (may contain personal data)
+debug_*.html
+out.txt
