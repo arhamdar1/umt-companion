@@ -26,9 +26,10 @@ LOGIN_URL = f"{BASE_URL}/Account/Login"
 ATTENDANCE_LIST_URL = f"{BASE_URL}/Attendance"
 VIEW_ATTENDANCE_URL = f"{BASE_URL}/Attendance/ViewAttendance"   # needs ?id=...
 
-PAGE_TIMEOUT_MS = 30000
-REPORT_TIMEOUT_MS = 60000
-LOGIN_ATTEMPTS = 15         # retry the CAPTCHA this many times before giving up
+PAGE_TIMEOUT_MS = 60000      # how long to wait for a page before giving up
+REPORT_TIMEOUT_MS = 60000    # how long to wait for the attendance table
+PAGE_RETRIES = 2             # try opening a page this many times before failing
+LOGIN_ATTEMPTS = 15          # retry the CAPTCHA this many times before giving up
 
 
 # ---------- Custom errors ----------
@@ -116,20 +117,34 @@ class PortalClient:
             except Exception:
                 pass
 
+    # ----- opening pages -----
+
+    def _open(self, page, url: str) -> None:
+        """
+        Open a page. Wait only for its HTML (domcontentloaded), not for every
+        third-party script, and retry on timeout.
+        """
+        last_error = None
+        for _ in range(PAGE_RETRIES):
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+                return
+            except PlaywrightTimeoutError as error:
+                last_error = error
+        raise PortalConnectionError(f"Could not open {url}: {last_error}")
+
     # ----- login (with CAPTCHA retry) -----
 
     def login(self) -> None:
         last_error_message = "Login failed."
 
         for attempt in range(1, LOGIN_ATTEMPTS + 1):
-            try:
-                # Always start from a fresh login page so the CAPTCHA is current
-                self.page.goto(LOGIN_URL)
-            except PlaywrightTimeoutError as error:
-                raise PortalConnectionError(f"Could not open the login page: {error}") from error
+            # Always start from a fresh login page so the CAPTCHA is current
+            self._open(self.page, LOGIN_URL)
 
             # Read the SecurityCode text, then fill + submit immediately
             try:
+                self.page.wait_for_selector("span.captcha", timeout=PAGE_TIMEOUT_MS)
                 security_code = clean_text(self.page.locator("span.captcha").inner_text())
             except Exception as error:
                 raise PortalDataError(f"Could not read the SecurityCode: {error}") from error
@@ -138,7 +153,7 @@ class PortalClient:
                 self.page.fill('input[name="student_id"]', self.student_id)
                 self.page.fill('input[name="Password"]', self._password)
                 self.page.fill('input[name="SecurityCode"]', security_code)
-                with self.page.expect_navigation():
+                with self.page.expect_navigation(wait_until="domcontentloaded"):
                     self.page.press('input[name="SecurityCode"]', "Enter")
             except PlaywrightTimeoutError as error:
                 raise PortalConnectionError(f"Login did not complete: {error}") from error
@@ -180,13 +195,15 @@ class PortalClient:
         if not self.logged_in:
             raise PortalDataError("Not logged in yet. Call login() first.")
 
-        try:
-            self.page.goto(ATTENDANCE_LIST_URL)
-        except PlaywrightTimeoutError as error:
-            raise PortalConnectionError(f"Could not open the attendance page: {error}") from error
+        self._open(self.page, ATTENDANCE_LIST_URL)
 
         if "/Account/Login" in self.page.url:
             raise PortalDataError("Session expired. Please log in again.")
+
+        try:
+            self.page.wait_for_selector("a[data-assigned-id]", timeout=PAGE_TIMEOUT_MS)
+        except PlaywrightTimeoutError as error:
+            raise PortalDataError("No subjects found on the attendance page.") from error
 
         rows = self.page.eval_on_selector_all(
             "a[data-assigned-id]",
@@ -228,7 +245,7 @@ class PortalClient:
         tab = self._context.new_page()
         tab.set_default_timeout(PAGE_TIMEOUT_MS)
         try:
-            tab.goto(f"{VIEW_ATTENDANCE_URL}?id={subject.assigned_id}")
+            self._open(tab, f"{VIEW_ATTENDANCE_URL}?id={subject.assigned_id}")
 
             frame = None
             for _ in range(3):
@@ -272,10 +289,7 @@ class PortalClient:
     def _parse_report(html: str) -> tuple[int, int]:
         """
         Count each 'Present' / 'Absent' text exactly once.
-
-        We look at TEXT nodes, not tags. A tag like <div> wrapping <div>
-        wrapping the word 'Present' would otherwise be counted once per
-        wrapper, which is why numbers came out 3x too big.
+        We look at TEXT nodes, not tags, so nested wrappers are not counted twice.
         """
         soup = BeautifulSoup(html, "html.parser")
 
