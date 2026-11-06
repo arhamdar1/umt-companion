@@ -4,7 +4,7 @@ lms_client.py
 Handles everything related to UMT LMS (which runs on Moodle):
 - logging in
 - fetching upcoming deadlines (dashboard Timeline)
-- building a full-semester assignment report (submitted / not submitted)
+- building a semester report (submitted / not submitted) for any date range
 """
 
 import re
@@ -87,9 +87,9 @@ class SemesterAssignment:
     course: str
     title: str
     due: datetime | None   # None if the assignment has no due date
-    due_text: str          # original text from the page, e.g. 'Saturday, 24 October 2026, 11:59 PM'
+    due_text: str          # original text from the page
     submitted: bool        # True = you've submitted it
-    status_text: str       # original status, e.g. 'Submitted for grading' / 'No submission'
+    status_text: str       # original status, e.g. 'Submitted for grading'
     grade: str             # e.g. '8.00 / 10.00' or '-'
     url: str
 
@@ -205,7 +205,7 @@ class LMSClient:
 
         days_back:  include overdue items from the last N days (Moodle itself uses 14)
         days_ahead: only items due within the next N days.
-                    Use None to get everything, no matter how far away.
+                    None = everything, no matter how far away.
         """
         now = int(time.time())          # "Unix time" = seconds since 1 Jan 1970
         one_day = 24 * 60 * 60
@@ -236,13 +236,20 @@ class LMSClient:
         deadlines.sort(key=lambda d: d.due)
         return deadlines
 
-    # ===== Feature 2: full semester report =====
+    # ===== Feature 2: semester report =====
 
-    def get_current_courses(self) -> list[tuple[int, str]]:
-        """Return [(course_id, course_name), ...] for courses you're currently enrolled in."""
+    def get_courses(self, classification: str = "all") -> list[tuple[int, str]]:
+        """
+        Return [(course_id, course_name), ...].
+
+        classification:
+          "all"        = current AND past courses (needed for old semesters)
+          "inprogress" = only courses running right now
+          "past"       = only finished courses
+        """
         data = self._call_api(
             "core_course_get_enrolled_courses_by_timeline_classification",
-            {"offset": 0, "limit": 0, "classification": "inprogress", "sort": "fullname"},
+            {"offset": 0, "limit": 0, "classification": classification, "sort": "fullname"},
         )
         return [(course["id"], clean_text(course["fullname"])) for course in data.get("courses", [])]
 
@@ -254,7 +261,7 @@ class LMSClient:
         if table is None:
             return []   # this course has no assignments
 
-        # Read the column headings, e.g. ['topic', 'assignments', 'due date', 'submission', 'grade']
+        # Column headings, e.g. ['topic', 'assignments', 'due date', 'submission', 'grade']
         header_row = table.find("tr")
         headers = [clean_text(th.get_text()).lower() for th in header_row.find_all("th")]
 
@@ -275,7 +282,7 @@ class LMSClient:
 
         assignments = []
         for row in table.find_all("tr")[1:]:          # [1:] skips the heading row
-            cells = row.find_all(["td", "th"])   # count both cell types so columns line up
+            cells = row.find_all("td")
             if len(cells) <= name_col:
                 continue                              # empty / divider row
 
@@ -313,14 +320,22 @@ class LMSClient:
 
         return assignments
 
-    def get_semester_assignments(self) -> list[SemesterAssignment]:
-        """Every assignment in every current course, with submitted / not submitted status."""
+    def get_semester_assignments(self, start: datetime, end: datetime) -> list[SemesterAssignment]:
+        """
+        Every assignment with a due date between `start` and `end` (inclusive),
+        across all your courses, with submitted / not submitted status.
+        Assignments without a due date are left out.
+        """
         all_assignments = []
 
-        for course_id, course_name in self.get_current_courses():
-            all_assignments.extend(self._get_course_assignments(course_id, course_name))
+        for course_id, course_name in self.get_courses("all"):
+            try:
+                all_assignments.extend(self._get_course_assignments(course_id, course_name))
+            except LMSDataError as error:
+                # One odd course page should not kill the whole report
+                print(f"  [skip] {course_name}: {error}")
             time.sleep(DELAY_BETWEEN_PAGES)   # be polite to the server
 
-        # Sort by due date; assignments without a due date go to the end
-        all_assignments.sort(key=lambda a: a.due or datetime.max)
-        return all_assignments
+        in_range = [a for a in all_assignments if a.due and start <= a.due <= end]
+        in_range.sort(key=lambda a: a.due)
+        return in_range
