@@ -4,14 +4,14 @@ portal_client.py
 Handles the UMT Student Portal (ASP.NET + ReportViewer).
 Uses Playwright so the JavaScript attendance report renders, then reads it.
 
+Browser mode:
+  - Normal use (the app's sync): runs in the background with NO window.
+    It uses the full Chromium engine, so popups and tables load like in Chrome.
+  - show_browser=True: opens a visible window (only for testing).
+
 Attendance counting:
   attended = number of 'Present' entries
   total    = number of 'Present' + 'Absent' entries
-Unmarked / missing lectures are ignored.
-
-Login: the SecurityCode is plain text on the page, but the page can refresh
-between reading it and submitting, which changes the code. So we read + submit
-immediately, and retry if the portal says 'Invalid Code'.
 """
 
 import re
@@ -26,10 +26,19 @@ LOGIN_URL = f"{BASE_URL}/Account/Login"
 ATTENDANCE_LIST_URL = f"{BASE_URL}/Attendance"
 VIEW_ATTENDANCE_URL = f"{BASE_URL}/Attendance/ViewAttendance"   # needs ?id=...
 
-PAGE_TIMEOUT_MS = 60000      # how long to wait for a page before giving up
-REPORT_TIMEOUT_MS = 60000    # how long to wait for the attendance table
-PAGE_RETRIES = 2             # try opening a page this many times before failing
+PAGE_TIMEOUT_MS = 60000      # how long to wait for a normal page
+PAGE_RETRIES = 2             # try opening a normal page this many times
 LOGIN_ATTEMPTS = 15          # retry the CAPTCHA this many times before giving up
+
+REPORT_ATTEMPTS = 3          # try each subject's report this many times
+REPORT_ATTEMPT_MS = 45000    # wait this long for one try, then start a new try
+FRAME_WAIT_MS = 15000        # wait this long for the report frame to appear
+
+# Runs inside the report frame. True once the summary line 'Total Lectures : N' is shown.
+REPORT_READY_JS = """() => {
+    const t = document.body ? document.body.innerText : '';
+    return /Total\\s*Lectures\\s*:?\\s*\\d+/i.test(t);
+}"""
 
 
 # ---------- Custom errors ----------
@@ -78,7 +87,7 @@ class Attendance:
 
 class PortalClient:
     """
-    Opens a headless browser, logs in, and reads attendance.
+    Opens a browser, logs in, and reads attendance.
 
         with PortalClient(student_id, password) as portal:
             portal.login()
@@ -88,7 +97,7 @@ class PortalClient:
     def __init__(self, student_id: str, password: str, show_browser: bool = False):
         self.student_id = student_id
         self._password = password
-        self._headless = not show_browser
+        self._show = show_browser
 
         self._playwright = None
         self._browser = None
@@ -101,8 +110,22 @@ class PortalClient:
     def __enter__(self):
         try:
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=self._headless)
-            self._context = self._browser.new_context()
+
+            if self._show:
+                # Visible window, only for testing
+                self._browser = self._playwright.chromium.launch(headless=False)
+            else:
+                # Background: the full Chromium engine with NO window at all.
+                # 'channel="chromium"' makes it behave like a normal Chrome,
+                # so popups and tables load the same way.
+                self._browser = self._playwright.chromium.launch(
+                    channel="chromium",
+                    headless=True,
+                )
+
+            self._context = self._browser.new_context(
+                viewport={"width": 1280, "height": 900}
+            )
             self._context.set_default_timeout(PAGE_TIMEOUT_MS)
             self.page = self._context.new_page()
         except Exception as error:
@@ -119,13 +142,13 @@ class PortalClient:
 
     # ----- opening pages -----
 
-    def _open(self, page, url: str) -> None:
+    def _open(self, page, url: str, tries: int = PAGE_RETRIES) -> None:
         """
-        Open a page. Wait only for its HTML (domcontentloaded), not for every
-        third-party script, and retry on timeout.
+        Open a page. Wait only for its HTML (domcontentloaded), and retry
+        on timeout. Raises PortalConnectionError if every try fails.
         """
         last_error = None
-        for _ in range(PAGE_RETRIES):
+        for _ in range(tries):
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
                 return
@@ -237,43 +260,37 @@ class PortalClient:
 
     # ----- one subject's attendance -----
 
-    def get_attendance(self, subject: Attendance) -> None:
-        """Open the subject's report in a FRESH tab and read attended / total."""
-        if not self.logged_in:
-            raise PortalDataError("Not logged in yet. Call login() first.")
+    def _find_report_frame(self, tab, wait_ms: int = FRAME_WAIT_MS):
+        """Wait (up to wait_ms) for the iframe that holds the report. Returns it or None."""
+        waited = 0
+        while waited <= wait_ms:
+            for candidate in tab.frames:
+                url = candidate.url or ""
+                if "Attendance.aspx" in url or "/Reports/" in url:
+                    return candidate
+            tab.wait_for_timeout(500)
+            waited += 500
+        return None
 
+    def _load_report_html(self, subject: Attendance) -> str:
+        """
+        One try: open the subject's report in a FRESH tab and return its HTML.
+        Raises PortalDataError if the report is not ready in time.
+        """
         tab = self._context.new_page()
-        tab.set_default_timeout(PAGE_TIMEOUT_MS)
         try:
-            self._open(tab, f"{VIEW_ATTENDANCE_URL}?id={subject.assigned_id}")
+            self._open(tab, f"{VIEW_ATTENDANCE_URL}?id={subject.assigned_id}", tries=1)
 
-            frame = None
-            for _ in range(3):
-                for candidate in tab.frames:
-                    url = candidate.url or ""
-                    if "Attendance.aspx" in url or "/Reports/" in url:
-                        frame = candidate
-                        break
-                if frame is not None:
-                    break
-                tab.wait_for_timeout(1500)
+            frame = self._find_report_frame(tab)
             if frame is None:
-                raise PortalDataError("Could not find the report frame.")
+                raise PortalDataError("the report frame did not appear")
 
-            # Wait until the summary line ('Total Lectures : N') is rendered,
-            # which means the whole table has finished loading.
-            frame.wait_for_function(
-                """() => {
-                    const t = document.body ? document.body.innerText : '';
-                    return /Total\\s*Lectures\\s*:?\\s*\\d+/i.test(t);
-                }""",
-                timeout=REPORT_TIMEOUT_MS,
-            )
+            frame.wait_for_function(REPORT_READY_JS, timeout=REPORT_ATTEMPT_MS)
+            return frame.content()
 
-            report_html = frame.content()
         except PlaywrightTimeoutError as error:
             raise PortalDataError(
-                f"Report did not load in time for {subject.course_id}: {error}"
+                f"report still loading after {REPORT_ATTEMPT_MS // 1000} seconds"
             ) from error
         finally:
             try:
@@ -281,9 +298,34 @@ class PortalClient:
             except Exception:
                 pass
 
-        attended, total = self._parse_report(report_html)
-        subject.attended = attended
-        subject.total = total
+    def get_attendance(self, subject: Attendance) -> None:
+        """
+        Fill in attended / total for one subject.
+        Tries up to REPORT_ATTEMPTS times, each time in a fresh tab.
+        """
+        if not self.logged_in:
+            raise PortalDataError("Not logged in yet. Call login() first.")
+
+        last_error = None
+        for attempt in range(1, REPORT_ATTEMPTS + 1):
+            try:
+                report_html = self._load_report_html(subject)
+                attended, total = self._parse_report(report_html)
+                subject.attended = attended
+                subject.total = total
+                return
+            except (PortalConnectionError, PortalDataError) as error:
+                last_error = error
+                if attempt < REPORT_ATTEMPTS:
+                    print(
+                        f"  [retry] {subject.course_id}: try {attempt} failed "
+                        f"({error}), trying again..."
+                    )
+                    self.page.wait_for_timeout(2000)
+
+        raise PortalDataError(
+            f"could not load after {REPORT_ATTEMPTS} tries: {last_error}"
+        )
 
     @staticmethod
     def _parse_report(html: str) -> tuple[int, int]:
@@ -313,4 +355,6 @@ class PortalClient:
                 self.get_attendance(subject)
             except (PortalConnectionError, PortalDataError) as error:
                 print(f"  [skip] {subject.course_id}: {error}")
+            except Exception as error:
+                print(f"  [skip] {subject.course_id}: unexpected problem: {error}")
         return subjects
