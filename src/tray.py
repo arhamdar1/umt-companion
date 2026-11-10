@@ -11,16 +11,18 @@ Right-click menu:
 Double-clicking the icon also opens the window.
 """
 
-from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
+from app_icon import make_app_icon
 
 
 def create_tray(app: QApplication, window) -> QSystemTrayIcon:
     """Create the tray icon and connect its menu to the main window."""
     tray = QSystemTrayIcon(app)
 
-    # Use a built-in Windows icon, so we don't need an image file yet
-    tray.setIcon(app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+    # The same UC logo as the window and the Logins dialog
+    tray.setIcon(make_app_icon())
     tray.setToolTip("UMT Companion")
 
     menu = QMenu()

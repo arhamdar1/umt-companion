@@ -73,14 +73,20 @@ PASS_MARKS = 50.0           # below this percentage of marks, show in red
 FADE_MS = 350               # how long the window fade-in takes
 TIME_FORMAT = "%d %b %Y, %I:%M %p"   # e.g. "08 Nov 2026, 01:25 PM"
 
+# How each activity type is shown in the Deadlines "Type" column
+ACTIVITY_NAMES = {
+    "assign": "Assignment",
+    "quiz": "Quiz",
+    "forum": "Forum",
+    "lesson": "Lesson",
+}
+
 # Colours used across the app
 GREEN = "#3ddc84"
 RED = "#ff5c5c"
 ORANGE = "#ffb84d"
 BLUE = "#5ac8fa"
-ACCENT = "#4f7cff"
 NORMAL = "#e8ecf5"
-MUTED = "#9fb0cc"
 SOFT_BLUE = "#b8c7e6"       # used for course names and 'last checked' times
 DIM = "#7d8899"             # used for 'not checked yet'
 
@@ -583,7 +589,7 @@ class AccountDialog(QDialog):
         layout.addWidget(subtitle)
 
         # ----- one card per site -----
-        layout.addWidget(self._site_card("LMS (Moodle)", self.lms_user, self.lms_pass))
+        layout.addWidget(self._site_card("LMS", self.lms_user, self.lms_pass))
         layout.addWidget(self._site_card("Student Portal", self.portal_user, self.portal_pass))
 
         # ----- note -----
@@ -987,7 +993,7 @@ class MainWindow(QMainWindow):
                 time_left_text(due, now),
                 item["title"],
                 item["course"],
-                item["activity_type"],
+                ACTIVITY_NAMES.get(item["activity_type"], item["activity_type"]),
             ]
             for col, value in enumerate(values):
                 self.deadline_table.setItem(
@@ -1216,7 +1222,8 @@ class MainWindow(QMainWindow):
             ]
             for col, value in enumerate(values):
                 self.sem_table.setItem(
-                    row, col, make_item(value, center=(col in (0, 1, 4)), color=color if col == 0 else NORMAL)
+                    row, col,
+                    make_item(value, center=(col in (0, 1, 4)), color=color if col == 0 else NORMAL),
                 )
 
         self.sem_summary.setText(

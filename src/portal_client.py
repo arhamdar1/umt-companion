@@ -6,12 +6,16 @@ Uses Playwright so the JavaScript attendance report renders, then reads it.
 
 Browser mode:
   - Normal use (the app's sync): runs in the background with NO window.
-    It uses the full Chromium engine, so popups and tables load like in Chrome.
   - show_browser=True: opens a visible window (only for testing).
 
 Attendance counting:
   attended = number of 'Present' entries
   total    = number of 'Present' + 'Absent' entries
+
+Reading the report:
+  A report counts as ready when either the 'Total Lectures' line OR the
+  Present/Absent rows are visible. It is read repeatedly, and if the numbers
+  keep changing, the latest reading is used instead of skipping the subject.
 """
 
 import re
@@ -33,11 +37,16 @@ LOGIN_ATTEMPTS = 15          # retry the CAPTCHA this many times before giving u
 REPORT_ATTEMPTS = 3          # try each subject's report this many times
 REPORT_ATTEMPT_MS = 45000    # wait this long for one try, then start a new try
 FRAME_WAIT_MS = 15000        # wait this long for the report frame to appear
+STABLE_CHECKS = 2            # how many identical readings in a row we need
+STABLE_GAP_MS = 1500         # pause between two readings
+MAX_READINGS = 8             # after this many readings, use the latest one
 
-# Runs inside the report frame. True once the summary line 'Total Lectures : N' is shown.
+# Ready = the summary line is shown, OR at least one Present/Absent cell is shown.
 REPORT_READY_JS = """() => {
     const t = document.body ? document.body.innerText : '';
-    return /Total\\s*Lectures\\s*:?\\s*\\d+/i.test(t);
+    if (/Total\\s*Lectures\\s*:?\\s*\\d+/i.test(t)) return true;
+    const cells = Array.from(document.querySelectorAll('td, div, span'));
+    return cells.some(e => /^(present|absent)$/i.test((e.innerText || '').trim()));
 }"""
 
 
@@ -112,12 +121,8 @@ class PortalClient:
             self._playwright = sync_playwright().start()
 
             if self._show:
-                # Visible window, only for testing
                 self._browser = self._playwright.chromium.launch(headless=False)
             else:
-                # Background: the full Chromium engine with NO window at all.
-                # 'channel="chromium"' makes it behave like a normal Chrome,
-                # so popups and tables load the same way.
                 self._browser = self._playwright.chromium.launch(
                     channel="chromium",
                     headless=True,
@@ -162,10 +167,8 @@ class PortalClient:
         last_error_message = "Login failed."
 
         for attempt in range(1, LOGIN_ATTEMPTS + 1):
-            # Always start from a fresh login page so the CAPTCHA is current
             self._open(self.page, LOGIN_URL)
 
-            # Read the SecurityCode text, then fill + submit immediately
             try:
                 self.page.wait_for_selector("span.captcha", timeout=PAGE_TIMEOUT_MS)
                 security_code = clean_text(self.page.locator("span.captcha").inner_text())
@@ -183,12 +186,10 @@ class PortalClient:
             except Exception as error:
                 raise PortalDataError(f"Could not fill the login form: {error}") from error
 
-            # Success = we're no longer on a login page
             if "/Account/Login" not in self.page.url:
                 self.logged_in = True
                 return
 
-            # Read the portal's error message
             message = "Login failed."
             try:
                 box = self.page.locator(".validation-summary-errors, .text-danger").first
@@ -200,8 +201,6 @@ class PortalClient:
                 pass
             last_error_message = message
 
-            # 'Invalid Code' = wrong CAPTCHA -> try again with a fresh one.
-            # Anything else (e.g. wrong password) -> stop now, retrying won't help.
             if "code" not in message.lower():
                 raise PortalLoginError(message)
 
@@ -272,10 +271,41 @@ class PortalClient:
             waited += 500
         return None
 
+    def _read_stable_report(self, tab, frame) -> str:
+        """
+        Read the report until STABLE_CHECKS readings in a row give the same
+        numbers. If the numbers keep changing, the latest reading is used,
+        as long as it has at least one lecture in it.
+        """
+        previous = None
+        same_in_a_row = 0
+        last_html = ""
+
+        for _ in range(MAX_READINGS):
+            frame.wait_for_function(REPORT_READY_JS, timeout=REPORT_ATTEMPT_MS)
+            html = frame.content()
+            last_html = html
+            numbers = self._parse_report(html)
+
+            if numbers == previous:
+                same_in_a_row += 1
+                if same_in_a_row >= STABLE_CHECKS:
+                    return html
+            else:
+                same_in_a_row = 1
+                previous = numbers
+
+            tab.wait_for_timeout(STABLE_GAP_MS)
+
+        # Numbers kept changing. Use the latest reading if it has real data.
+        attended, total = self._parse_report(last_html)
+        if total > 0:
+            return last_html
+        raise PortalDataError("the report had no lecture rows")
+
     def _load_report_html(self, subject: Attendance) -> str:
         """
         One try: open the subject's report in a FRESH tab and return its HTML.
-        Raises PortalDataError if the report is not ready in time.
         """
         tab = self._context.new_page()
         try:
@@ -285,8 +315,7 @@ class PortalClient:
             if frame is None:
                 raise PortalDataError("the report frame did not appear")
 
-            frame.wait_for_function(REPORT_READY_JS, timeout=REPORT_ATTEMPT_MS)
-            return frame.content()
+            return self._read_stable_report(tab, frame)
 
         except PlaywrightTimeoutError as error:
             raise PortalDataError(

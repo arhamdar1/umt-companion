@@ -10,8 +10,8 @@ Startup:
   2. it fades out and the main window fades in
   3. the tray icon and background jobs start
 
-The splash is drawn live at your screen's resolution (not a small picture
-that gets stretched), so it stays sharp on any Windows display scaling.
+The UC icon is set for the whole app, so the window title bars, the Logins
+window and the tray icon all show the same logo.
 
 Closing the window keeps the app running in the tray. Use "Quit" in the
 tray menu to fully close it.
@@ -33,6 +33,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon, QWidget
 
 import db
+from app_icon import make_app_icon
 from gui import APP_VERSION, DEVELOPER, MainWindow
 from scheduler import start_background_sync
 from tray import create_tray
@@ -187,6 +188,9 @@ def main() -> int:
     # Closing the last window must NOT quit the app. The tray keeps it alive.
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    # One icon for the whole app: window title bars, dialogs and the tray
+    app.setWindowIcon(make_app_icon())
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(None, APP_NAME, "System tray is not available on this computer.")
