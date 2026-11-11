@@ -42,3 +42,5 @@ desktop.ini
 # Debug output (may contain personal data)
 debug_*.html
 out.txt
+# PyInstaller spec file (build setting, not code)
+*.spec
